@@ -125,11 +125,11 @@ pub(crate) fn text_fast<'a>(mut s: &'a [u8], line_ending: &str) -> IResult<&'a [
     Ok((s, Text::from(lines)))
 }
 
-pub(crate) fn line<'le>(
+pub(crate) fn line(
     style: Style,
-    line_ending: Option<&'le str>,
+    line_ending: Option<&'_ str>,
     lossy: bool,
-) -> impl Fn(&[u8]) -> IResult<&[u8], (Line<'static>, Style)> + 'le {
+) -> impl Fn(&[u8]) -> IResult<&[u8], (Line<'static>, Style)> + '_ {
     move |s: &[u8]| -> IResult<&[u8], (Line<'static>, Style)> {
         let (s, mut text) = take_until_line_ending(line_ending, true)(s)?;
 
@@ -159,10 +159,10 @@ pub(crate) fn line<'le>(
 }
 
 #[cfg(feature = "zero-copy")]
-fn line_fast<'le>(
+fn line_fast(
     style: Style,
-    line_ending: Option<&'le str>,
-) -> impl Fn(&[u8]) -> IResult<&[u8], (Line<'_>, Style)> + 'le {
+    line_ending: Option<&'_ str>,
+) -> impl Fn(&[u8]) -> IResult<&[u8], (Line<'_>, Style)> + '_ {
     // let style_: Style = Default::default();
     move |s: &[u8]| -> IResult<&[u8], (Line<'_>, Style)> {
         let (s, mut text) = take_until_line_ending(line_ending, true)(s)?;
@@ -191,11 +191,12 @@ fn line_fast<'le>(
     }
 }
 
-fn span<'le>(
+#[allow(clippy::type_complexity)]
+fn span(
     last: Style,
-    line_ending: Option<&'le str>,
+    line_ending: Option<&'_ str>,
     lossy: bool,
-) -> impl Fn(&[u8]) -> IResult<&[u8], ValueOrClear<Span<'static>>, nom::error::Error<&[u8]>> + 'le {
+) -> impl Fn(&[u8]) -> IResult<&[u8], ValueOrClear<Span<'static>>, nom::error::Error<&[u8]>> + '_ {
     move |s: &[u8]| -> IResult<&[u8], ValueOrClear<Span<'static>>> {
         let mut last = last;
         let (s, style) = opt(style(last))(s)?;
@@ -232,10 +233,11 @@ fn span<'le>(
 }
 
 #[cfg(feature = "zero-copy")]
-fn span_fast<'le>(
+#[allow(clippy::type_complexity)]
+fn span_fast(
     last: Style,
-    line_ending: Option<&'le str>,
-) -> impl Fn(&[u8]) -> IResult<&[u8], ValueOrClear<Span<'_>>, nom::error::Error<&[u8]>> + 'le {
+    line_ending: Option<&'_ str>,
+) -> impl Fn(&[u8]) -> IResult<&[u8], ValueOrClear<Span<'_>>, nom::error::Error<&[u8]>> + '_ {
     move |s: &[u8]| -> IResult<&[u8], ValueOrClear<Span<'_>>> {
         let mut last = last;
         let (s, style) = opt(style(last))(s)?;
@@ -262,6 +264,7 @@ fn span_fast<'le>(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn style(
     style: Style,
 ) -> impl Fn(&[u8]) -> IResult<&[u8], Option<ValueOrClear<Style>>, nom::error::Error<&[u8]>> {
@@ -381,9 +384,9 @@ fn color_type(s: &[u8]) -> IResult<&[u8], ColorType> {
     }
 }
 
-fn take_until_esc_or_line_ending<'le>(
-    line_ending: Option<&'le str>,
-) -> impl Fn(&[u8]) -> IResult<&[u8], &[u8]> + 'le {
+fn take_until_esc_or_line_ending(
+    line_ending: Option<&'_ str>,
+) -> impl Fn(&[u8]) -> IResult<&[u8], &[u8]> + '_ {
     move |input: &[u8]| {
         let esc = b'\x1b';
         let le_bytes = line_ending.map(|le| le.as_bytes());
@@ -394,7 +397,9 @@ fn take_until_esc_or_line_ending<'le>(
                 if b == esc {
                     Some(i)
                 } else if let Some(le) = le_bytes {
-                    if le.len() > 0 && i + le.len() <= input.len() && &input[i..i + le.len()] == le
+                    if !le.is_empty()
+                        && i + le.len() <= input.len()
+                        && &input[i..i + le.len()] == le
                     {
                         Some(i)
                     } else {
@@ -409,10 +414,10 @@ fn take_until_esc_or_line_ending<'le>(
     }
 }
 
-fn take_until_line_ending<'le>(
-    line_ending: Option<&'le str>,
+fn take_until_line_ending(
+    line_ending: Option<&'_ str>,
     consume: bool,
-) -> impl Fn(&[u8]) -> IResult<&[u8], &[u8]> + 'le {
+) -> impl Fn(&[u8]) -> IResult<&[u8], &[u8]> + '_ {
     move |input: &[u8]| {
         if let Some(le) = line_ending {
             let le_bytes = le.as_bytes();
