@@ -20,13 +20,13 @@
 //! ```rust
 //! use ansi_to_tui::IntoText;
 //! let bytes = b"\x1b[38;2;225;192;203mAAAAA\x1b[0m".to_owned().to_vec();
-//! let text = bytes.into_text().unwrap();
+//! let text = bytes.into_text("\n").unwrap();
 //! ```
 //! Example parsing from a file.
 //! ```rust
 //! use ansi_to_tui::IntoText;
 //! let buffer = std::fs::read("ascii/text.ascii").unwrap();
-//! let text = buffer.into_text().unwrap();
+//! let text = buffer.into_text("\n").unwrap();
 //! ```
 //!
 //! If you want to use [`simdutf8`][simdutf8] instead of `String::from_utf8()`
@@ -50,44 +50,70 @@ use tui::{
 pub trait IntoText {
     /// Convert the type to a Text.
     #[allow(clippy::wrong_self_convention)]
-    fn into_text(&self) -> Result<Text<'static>, Error>;
+    fn into_text(&self, line_ending: &str) -> Result<Text<'static>, Error>;
     /// Convert the type to a Text with lossy UTF-8 conversion.
     #[allow(clippy::wrong_self_convention)]
-    fn into_text_lossy(&self) -> Result<Text<'static>, Error>;
+    fn into_text_lossy(&self, line_ending: &str) -> Result<Text<'static>, Error>;
     /// Convert the type to a Line.
+    ///
+    /// Stops at first occurrence of `line_ending` if provided.
     #[allow(clippy::wrong_self_convention)]
-    fn into_line(&self, initial_style: Style) -> Result<Line<'static>, Error>;
+    fn into_line(
+        &self,
+        line_ending: Option<&str>,
+        initial_style: Style,
+    ) -> Result<Line<'static>, Error>;
     /// Convert the type to a Line with lossy UTF-8 conversion.
     #[allow(clippy::wrong_self_convention)]
-    fn into_line_lossy(&self, initial_style: Style) -> Result<Line<'static>, Error>;
+    fn into_line_lossy(
+        &self,
+        line_ending: Option<&str>,
+        initial_style: Style,
+    ) -> Result<Line<'static>, Error>;
     /// Convert the type to a Text while trying to copy as less as possible
     ///
     /// Doesn't support lossy conversion.
     #[cfg(feature = "zero-copy")]
-    fn to_text(&self) -> Result<Text<'_>, Error>;
+    fn to_text(&self, line_ending: &str) -> Result<Text<'_>, Error>;
 }
 impl<T> IntoText for T
 where
     T: AsRef<[u8]>,
 {
-    fn into_text(&self) -> Result<Text<'static>, Error> {
-        Ok(crate::parser::text(self.as_ref(), false)?.1)
+    fn into_text(&self, line_ending: &str) -> Result<Text<'static>, Error> {
+        Ok(crate::parser::text(self.as_ref(), line_ending, false)?.1)
     }
 
-    fn into_text_lossy(&self) -> Result<Text<'static>, Error> {
-        Ok(crate::parser::text(self.as_ref(), true)?.1)
+    fn into_text_lossy(&self, line_ending: &str) -> Result<Text<'static>, Error> {
+        Ok(crate::parser::text(self.as_ref(), line_ending, true)?.1)
     }
 
-    fn into_line(&self, init_style: Style) -> Result<Line<'static>, Error> {
-        Ok(crate::parser::line(init_style, false)(self.as_ref())?.1 .0)
+    fn into_line(
+        &self,
+        line_ending: Option<&str>,
+        initial_style: Style,
+    ) -> Result<Line<'static>, Error> {
+        Ok(
+            crate::parser::line(initial_style, line_ending, false)(self.as_ref())?
+                .1
+                 .0,
+        )
     }
 
-    fn into_line_lossy(&self, init_style: Style) -> Result<Line<'static>, Error> {
-        Ok(crate::parser::line(init_style, true)(self.as_ref())?.1 .0)
+    fn into_line_lossy(
+        &self,
+        line_ending: Option<&str>,
+        initial_style: Style,
+    ) -> Result<Line<'static>, Error> {
+        Ok(
+            crate::parser::line(initial_style, line_ending, true)(self.as_ref())?
+                .1
+                 .0,
+        )
     }
 
     #[cfg(feature = "zero-copy")]
-    fn to_text(&self) -> Result<Text<'_>, Error> {
-        Ok(crate::parser::text_fast(self.as_ref())?.1)
+    fn to_text(&self, line_ending: &str) -> Result<Text<'_>, Error> {
+        Ok(crate::parser::text_fast(self.as_ref(), line_ending)?.1)
     }
 }

@@ -2,11 +2,9 @@ use crate::code::AnsiCode;
 use nom::{
     branch::alt,
     bytes::complete::*,
-    character::complete::*,
-    character::is_alphabetic,
+    character::{complete::*, is_alphabetic},
     combinator::{map_res, opt, recognize, value},
-    error,
-    error::FromExternalError,
+    error::{self, Error, ErrorKind, FromExternalError},
     multi::*,
     sequence::{delimited, preceded, terminated, tuple},
     IResult, Parser,
@@ -17,6 +15,7 @@ use tui::{
     text::{Line, Span, Text},
 };
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum ValueOrClear<T> {
     Value(T),
     ClearLine,
@@ -93,10 +92,14 @@ impl From<AnsiStates> for tui::style::Style {
     }
 }
 
-pub(crate) fn text(mut s: &[u8], lossy: bool) -> IResult<&[u8], Text<'static>> {
+pub(crate) fn text<'a>(
+    mut s: &'a [u8],
+    line_ending: &str,
+    lossy: bool,
+) -> IResult<&'a [u8], Text<'static>> {
     let mut lines = Vec::new();
     let mut last = Style::new();
-    while let Ok((_s, (line, style))) = line(last, lossy)(s) {
+    while let Ok((_s, (line, style))) = line(last, Some(line_ending), lossy)(s) {
         lines.push(line);
         last = style;
         s = _s;
@@ -108,10 +111,10 @@ pub(crate) fn text(mut s: &[u8], lossy: bool) -> IResult<&[u8], Text<'static>> {
 }
 
 #[cfg(feature = "zero-copy")]
-pub(crate) fn text_fast(mut s: &[u8]) -> IResult<&[u8], Text<'_>> {
+pub(crate) fn text_fast<'a>(mut s: &'a [u8], line_ending: &str) -> IResult<&'a [u8], Text<'a>> {
     let mut lines = Vec::new();
     let mut last = Style::new();
-    while let Ok((_s, (line, style))) = line_fast(last)(s) {
+    while let Ok((_s, (line, style))) = line_fast(last, Some(line_ending))(s) {
         lines.push(line);
         last = style;
         s = _s;
@@ -122,22 +125,17 @@ pub(crate) fn text_fast(mut s: &[u8]) -> IResult<&[u8], Text<'_>> {
     Ok((s, Text::from(lines)))
 }
 
-pub(crate) fn line(
+pub(crate) fn line<'le>(
     style: Style,
+    line_ending: Option<&'le str>,
     lossy: bool,
-) -> impl Fn(&[u8]) -> IResult<&[u8], (Line<'static>, Style)> {
-    // let style_: Style = Default::default();
+) -> impl Fn(&[u8]) -> IResult<&[u8], (Line<'static>, Style)> + 'le {
     move |s: &[u8]| -> IResult<&[u8], (Line<'static>, Style)> {
-        let (s, mut text) = take_while(|c| c != b'\n')(s)?;
-        let (s, _) = opt(tag("\n"))(s)?;
-        // too destructive
-        // if let Some(pos) = text.windows(3).rposition(|window| window == b"\x1b[K") {
-        //     text = &text[pos + 3..];
-        // }
+        let (s, mut text) = take_until_line_ending(line_ending, true)(s)?;
 
         let mut spans = Vec::new();
         let mut last = style;
-        while let Ok((s, span)) = span(last, lossy)(text) {
+        while let Ok((s, span)) = span(last, line_ending, lossy)(text) {
             match span {
                 ValueOrClear::ClearLine => spans.clear(),
                 ValueOrClear::Value(span) => {
@@ -161,20 +159,28 @@ pub(crate) fn line(
 }
 
 #[cfg(feature = "zero-copy")]
-fn line_fast(style: Style) -> impl Fn(&[u8]) -> IResult<&[u8], (Line<'_>, Style)> {
+fn line_fast<'le>(
+    style: Style,
+    line_ending: Option<&'le str>,
+) -> impl Fn(&[u8]) -> IResult<&[u8], (Line<'_>, Style)> + 'le {
     // let style_: Style = Default::default();
     move |s: &[u8]| -> IResult<&[u8], (Line<'_>, Style)> {
-        let (s, mut text) = take_while(|c| c != b'\n')(s)?;
-        let (s, _) = opt(tag("\n"))(s)?;
+        let (s, mut text) = take_until_line_ending(line_ending, true)(s)?;
         let mut spans = Vec::new();
         let mut last = style;
-        while let Ok((s, span)) = span_fast(last)(text) {
-            last = last.patch(span.style);
-            // If the spans is empty then it might be possible that the style changes
-            // but there is no text change
-            if !span.content.is_empty() {
-                spans.push(span);
+        while let Ok((s, span)) = span_fast(last, line_ending)(text) {
+            match span {
+                ValueOrClear::ClearLine => spans.clear(),
+                ValueOrClear::Value(span) => {
+                    last = last.patch(span.style);
+                    // If the spans is empty then it might be possible that the style changes
+                    // but there is no text change
+                    if !span.content.is_empty() {
+                        spans.push(span);
+                    }
+                }
             }
+
             text = s;
             if text.is_empty() {
                 break;
@@ -185,12 +191,11 @@ fn line_fast(style: Style) -> impl Fn(&[u8]) -> IResult<&[u8], (Line<'_>, Style)
     }
 }
 
-// fn span(s: &[u8]) -> IResult<&[u8], tui::text::Span> {
-
-fn span(
+fn span<'le>(
     last: Style,
+    line_ending: Option<&'le str>,
     lossy: bool,
-) -> impl Fn(&[u8]) -> IResult<&[u8], ValueOrClear<Span<'static>>, nom::error::Error<&[u8]>> {
+) -> impl Fn(&[u8]) -> IResult<&[u8], ValueOrClear<Span<'static>>, nom::error::Error<&[u8]>> + 'le {
     move |s: &[u8]| -> IResult<&[u8], ValueOrClear<Span<'static>>> {
         let mut last = last;
         let (s, style) = opt(style(last))(s)?;
@@ -200,7 +205,7 @@ fn span(
         }
 
         if lossy {
-            let (s, text) = take_while(|c| c != b'\x1b' && c != b'\n')(s)?;
+            let (s, text) = take_until_esc_or_line_ending(line_ending)(s)?;
             let text = String::from_utf8_lossy(text);
             if let Some(ValueOrClear::Value(style)) = style.flatten() {
                 last = last.patch(style);
@@ -209,12 +214,12 @@ fn span(
             Ok((s, ValueOrClear::Value(Span::styled(text.to_string(), last))))
         } else {
             #[cfg(feature = "simd")]
-            let (s, text) = map_res(take_while(|c| c != b'\x1b' && c != b'\n'), |t| {
+            let (s, text) = map_res(take_until_esc_or_line_ending(line_ending), |t| {
                 simdutf8::basic::from_utf8(t)
             })(s)?;
 
             #[cfg(not(feature = "simd"))]
-            let (s, text) = map_res(take_while(|c| c != b'\x1b' && c != b'\n'), |t| {
+            let (s, text) = map_res(take_until_esc_or_line_ending(line_ending), |t| {
                 std::str::from_utf8(t)
             })(s)?;
             if let Some(ValueOrClear::Value(style)) = style.flatten() {
@@ -227,18 +232,25 @@ fn span(
 }
 
 #[cfg(feature = "zero-copy")]
-fn span_fast(last: Style) -> impl Fn(&[u8]) -> IResult<&[u8], Span<'_>, nom::error::Error<&[u8]>> {
-    move |s: &[u8]| -> IResult<&[u8], Span<'_>> {
+fn span_fast<'le>(
+    last: Style,
+    line_ending: Option<&'le str>,
+) -> impl Fn(&[u8]) -> IResult<&[u8], ValueOrClear<Span<'_>>, nom::error::Error<&[u8]>> + 'le {
+    move |s: &[u8]| -> IResult<&[u8], ValueOrClear<Span<'_>>> {
         let mut last = last;
         let (s, style) = opt(style(last))(s)?;
 
+        if let Some(Some(ValueOrClear::ClearLine)) = style {
+            return Ok((s, ValueOrClear::ClearLine));
+        }
+
         #[cfg(feature = "simd")]
-        let (s, text) = map_res(take_while(|c| c != b'\x1b' && c != b'\n'), |t| {
+        let (s, text) = map_res(take_until_esc_or_line_ending(line_ending), |t| {
             simdutf8::basic::from_utf8(t)
         })(s)?;
 
         #[cfg(not(feature = "simd"))]
-        let (s, text) = map_res(take_while(|c| c != b'\x1b' && c != b'\n'), |t| {
+        let (s, text) = map_res(take_until_esc_or_line_ending(line_ending), |t| {
             std::str::from_utf8(t)
         })(s)?;
 
@@ -246,7 +258,7 @@ fn span_fast(last: Style) -> impl Fn(&[u8]) -> IResult<&[u8], Span<'_>, nom::err
             last = last.patch(style);
         }
 
-        Ok((s, Span::styled(text, last)))
+        Ok((s, ValueOrClear::Value(Span::styled(text, last))))
     }
 }
 
@@ -264,9 +276,9 @@ fn style(
             ),
             (s, None) => {
                 // if no style found, check for a clear line
-                let (s, clr) = clear_line_code(s)?;
-                if clr.is_some() {
-                    return Ok((s, clr));
+                let (s, clear) = clear_line_code(s)?;
+                if clear.is_some() {
+                    return Ok((s, clear));
                 }
                 let (s, _) = any_escape_sequence(s)?;
                 (s, None)
@@ -369,78 +381,241 @@ fn color_type(s: &[u8]) -> IResult<&[u8], ColorType> {
     }
 }
 
-#[test]
-fn color_test() {
-    let c = color(b"2;255;255;255").unwrap();
-    assert_eq!(c.1, Color::Rgb(255, 255, 255));
-    let c = color(b"5;255").unwrap();
-    assert_eq!(c.1, Color::Indexed(255));
-    let err = color(b"10;255");
-    assert_ne!(err, Ok(c));
+fn take_until_esc_or_line_ending<'le>(
+    line_ending: Option<&'le str>,
+) -> impl Fn(&[u8]) -> IResult<&[u8], &[u8]> + 'le {
+    move |input: &[u8]| {
+        let esc = b'\x1b';
+        let le_bytes = line_ending.map(|le| le.as_bytes());
+        let pos = input
+            .iter()
+            .enumerate()
+            .find_map(|(i, &b)| {
+                if b == esc {
+                    Some(i)
+                } else if let Some(le) = le_bytes {
+                    if le.len() > 0 && i + le.len() <= input.len() && &input[i..i + le.len()] == le
+                    {
+                        Some(i)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(input.len());
+        Ok((&input[pos..], &input[..pos]))
+    }
 }
 
-// #[test]
-// fn ansi_items_test() {
-//     let sc = Default::default();
-//     let t = style(sc)(b"\x1b[38;2;3;3;3m").unwrap().1.unwrap();
-//     assert_eq!(
-//         t,
-//         Style::from(AnsiStates {
-//             style: sc,
-//             items: vec![AnsiItem {
-//                 code: AnsiCode::SetForegroundColor,
-//                 color: Some(Color::Rgb(3, 3, 3))
-//             }]
-//             .into()
-//         })
-//     );
-//     assert_eq!(
-//         style(sc)(b"\x1b[38;5;3m").unwrap().1.unwrap(),
-//         Style::from(AnsiStates {
-//             style: sc,
-//             items: vec![AnsiItem {
-//                 code: AnsiCode::SetForegroundColor,
-//                 color: Some(Color::Indexed(3))
-//             }]
-//             .into()
-//         })
-//     );
-//     assert_eq!(
-//         style(sc)(b"\x1b[38;5;3;48;5;3m").unwrap().1.unwrap(),
-//         Style::from(AnsiStates {
-//             style: sc,
-//             items: vec![
-//                 AnsiItem {
-//                     code: AnsiCode::SetForegroundColor,
-//                     color: Some(Color::Indexed(3))
-//                 },
-//                 AnsiItem {
-//                     code: AnsiCode::SetBackgroundColor,
-//                     color: Some(Color::Indexed(3))
-//                 }
-//             ]
-//             .into()
-//         })
-//     );
-//     assert_eq!(
-//         style(sc)(b"\x1b[38;5;3;48;5;3;1m").unwrap().1.unwrap(),
-//         Style::from(AnsiStates {
-//             style: sc,
-//             items: vec![
-//                 AnsiItem {
-//                     code: AnsiCode::SetForegroundColor,
-//                     color: Some(Color::Indexed(3))
-//                 },
-//                 AnsiItem {
-//                     code: AnsiCode::SetBackgroundColor,
-//                     color: Some(Color::Indexed(3))
-//                 },
-//                 AnsiItem {
-//                     code: AnsiCode::Bold,
-//                     color: None
-//                 }
-//             ]
-//             .into()
-//         })
-//     );
-// }
+fn take_until_line_ending<'le>(
+    line_ending: Option<&'le str>,
+    consume: bool,
+) -> impl Fn(&[u8]) -> IResult<&[u8], &[u8]> + 'le {
+    move |input: &[u8]| {
+        if let Some(le) = line_ending {
+            let le_bytes = le.as_bytes();
+            if le_bytes.is_empty() {
+                // No line ending bytes, return whole input
+                return Ok((&input[0..0], input));
+            }
+            if let Some(pos) = input.windows(le_bytes.len()).position(|w| w == le_bytes) {
+                let end = pos;
+                let after = if consume && end + le_bytes.len() <= input.len() {
+                    &input[end + le_bytes.len()..]
+                } else {
+                    &input[end..]
+                };
+                Ok((after, &input[..end]))
+            } else {
+                Ok((&input[input.len()..], input))
+            }
+        } else {
+            Ok((&input[input.len()..], input))
+        }
+    }
+}
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+
+    #[test]
+    fn test_take_until_esc_or_line_ending_esc() {
+        let input = b"Hello\x1b[1mWorld";
+        let f = take_until_esc_or_line_ending(None);
+        let (rest, out) = f(input).unwrap();
+        assert_eq!(out, b"Hello");
+        assert_eq!(rest, b"\x1b[1mWorld");
+    }
+
+    #[test]
+    fn test_take_until_esc_or_line_ending_line_ending_found() {
+        let input = b"foo\r\nbar";
+        let f = take_until_esc_or_line_ending(Some("\r\n"));
+        let (rest, out) = f(input).unwrap();
+        assert_eq!(out, b"foo");
+        assert_eq!(rest, b"\r\nbar");
+    }
+
+    #[test]
+    fn test_take_until_esc_or_line_ending_line_ending_not_found() {
+        let input = b"foo";
+        let f = take_until_esc_or_line_ending(Some("\n"));
+        let (rest, out) = f(input).unwrap();
+        assert_eq!(out, b"foo");
+        assert_eq!(rest, b"");
+    }
+
+    #[test]
+    fn test_take_until_esc_or_line_ending_both_present_picks_earliest() {
+        let input = b"xx\x1bfoo\nbar";
+        let f = take_until_esc_or_line_ending(Some("\n"));
+        let (rest, out) = f(input).unwrap();
+        assert_eq!(out, b"xx");
+        assert_eq!(rest, b"\x1bfoo\nbar");
+
+        let input = b"abc\ndef\x1bgh";
+        let f = take_until_esc_or_line_ending(Some("\n"));
+        let (rest, out) = f(input).unwrap();
+        assert_eq!(out, b"abc");
+        assert_eq!(rest, b"\ndef\x1bgh");
+    }
+
+    #[test]
+    fn test_take_until_esc_or_line_ending_empty_input() {
+        let input = b"";
+        let f = take_until_esc_or_line_ending(Some("\n"));
+        let (rest, out) = f(input).unwrap();
+        assert_eq!(out, b"");
+        assert_eq!(rest, b"");
+    }
+
+    #[test]
+    fn test_take_until_line_ending_none() {
+        let input = b"abc";
+        let f = take_until_line_ending(None, false);
+        let (rest, out) = f(input).unwrap();
+        assert_eq!(out, b"abc");
+        assert_eq!(rest, b"");
+    }
+
+    #[test]
+    fn test_take_until_line_ending_basic() {
+        let input = b"hello\nworld";
+        let f = take_until_line_ending(Some("\n"), false);
+        let (rest, out) = f(input).unwrap();
+        assert_eq!(out, b"hello");
+        assert_eq!(rest, b"\nworld");
+    }
+
+    #[test]
+    fn test_take_until_line_ending_consume_true() {
+        let input = b"foo\r\nbar";
+        let f = take_until_line_ending(Some("\r\n"), true);
+        let (rest, out) = f(input).unwrap();
+        assert_eq!(out, b"foo");
+        assert_eq!(rest, b"bar");
+    }
+
+    #[test]
+    fn test_take_until_line_ending_not_found() {
+        let input = b"foo";
+        let f = take_until_line_ending(Some("\n"), false);
+        let (rest, out) = f(input).unwrap();
+        assert_eq!(out, b"foo");
+        assert_eq!(rest, b"");
+    }
+
+    #[test]
+    fn test_take_until_line_ending_line_ending_empty() {
+        let input = b"foo";
+        let f = take_until_line_ending(Some(""), false);
+        let (rest, out) = f(input).unwrap();
+        assert_eq!(out, b"foo");
+        assert_eq!(rest, b"");
+    }
+}
+
+#[cfg(test)]
+mod ansi_tests {
+    use super::*;
+
+    #[test]
+    fn color_test() {
+        let c = color(b"2;255;255;255").unwrap();
+        assert_eq!(c.1, Color::Rgb(255, 255, 255));
+        let c = color(b"5;255").unwrap();
+        assert_eq!(c.1, Color::Indexed(255));
+        let err = color(b"10;255");
+        assert_ne!(err, Ok(c));
+    }
+
+    #[test]
+    fn ansi_items_test() {
+        let sc = Default::default();
+        let t = style(sc)(b"\x1b[38;2;3;3;3m").unwrap().1.unwrap();
+        use ValueOrClear::Value;
+        assert_eq!(
+            t,
+            Value(Style::from(AnsiStates {
+                style: sc,
+                items: vec![AnsiItem {
+                    code: AnsiCode::SetForegroundColor,
+                    color: Some(Color::Rgb(3, 3, 3))
+                }]
+                .into()
+            }))
+        );
+        assert_eq!(
+            style(sc)(b"\x1b[38;5;3m").unwrap().1.unwrap(),
+            Value(Style::from(AnsiStates {
+                style: sc,
+                items: vec![AnsiItem {
+                    code: AnsiCode::SetForegroundColor,
+                    color: Some(Color::Indexed(3))
+                }]
+                .into()
+            }))
+        );
+        assert_eq!(
+            style(sc)(b"\x1b[38;5;3;48;5;3m").unwrap().1.unwrap(),
+            Value(Style::from(AnsiStates {
+                style: sc,
+                items: vec![
+                    AnsiItem {
+                        code: AnsiCode::SetForegroundColor,
+                        color: Some(Color::Indexed(3))
+                    },
+                    AnsiItem {
+                        code: AnsiCode::SetBackgroundColor,
+                        color: Some(Color::Indexed(3))
+                    }
+                ]
+                .into()
+            }))
+        );
+        assert_eq!(
+            style(sc)(b"\x1b[38;5;3;48;5;3;1m").unwrap().1.unwrap(),
+            Value(Style::from(AnsiStates {
+                style: sc,
+                items: vec![
+                    AnsiItem {
+                        code: AnsiCode::SetForegroundColor,
+                        color: Some(Color::Indexed(3))
+                    },
+                    AnsiItem {
+                        code: AnsiCode::SetBackgroundColor,
+                        color: Some(Color::Indexed(3))
+                    },
+                    AnsiItem {
+                        code: AnsiCode::Bold,
+                        color: None
+                    }
+                ]
+                .into()
+            }))
+        );
+    }
+}

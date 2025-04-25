@@ -21,6 +21,17 @@ fn test_empty_op() {
 }
 
 #[test]
+fn test_clear_line() {
+    let string = b"FOO\n\x1b[32mGREEN\nFOO\x1b[KBAR";
+    let output = Text::from(vec![
+        Line::from(Span::raw("FOO")),
+        Line::from(Span::styled("GREEN", Style::default().fg(Color::Green))),
+        Line::from(Span::styled("BAR", Style::default().fg(Color::Green))),
+    ]);
+    test_both(string, output);
+}
+
+#[test]
 fn test_string() {
     let string: Vec<u8> = "FOO".to_string().bytes().collect();
     test_both(string, Text::raw("FOO"));
@@ -33,6 +44,17 @@ fn test_unicode() {
     let bytes = "AAA🅱️🅱️🅱️".as_bytes().to_vec();
     let output = Text::raw("AAA🅱️🅱️🅱️");
     test_both(bytes, output);
+}
+
+#[test]
+fn test_unicode_lossy() {
+    // "AA🦀BB\xafCC
+    let bytes = b"AA\xF0\x9F\xA6\x80BB\xafCC".to_vec();
+    let output = Text::raw("AA🦀BB�CC");
+    test_lossy(bytes, output);
+    let bytes = b"AA\xF0\x9F\xA6\x80BB\xaf\xfb\xfc\xfe\xfe\xefCC".to_vec();
+    let output = Text::raw("AA🦀BB������CC");
+    test_lossy(bytes, output);
 }
 
 #[test]
@@ -66,6 +88,38 @@ fn test_ascii_newlines() {
     ]);
 
     test_both(bytes, output);
+}
+
+#[test]
+fn test_custom_newlines() {
+    let bytes = "LINE_1\r\n\r\n\r\nLINE_4".as_bytes().to_vec();
+    let output = Text::from(vec![
+        Line::from("LINE_1"),
+        Line::from(""),
+        Line::from(""),
+        Line::from("LINE_4"),
+    ]);
+
+    test_both_le(&bytes, output, "\r\n");
+
+    let output = Text::from(vec![
+        Line::from("LINE_1"),
+        Line::from(Span::raw("\n")),
+        Line::from(Span::raw("\n")),
+        Line::from(Span::raw("\nLINE_4")),
+    ]);
+
+    test_both_le(&bytes, output, "\r");
+
+    let bytes = "LINE_1   LINE_4".as_bytes().to_vec();
+    let output = Text::from(vec![
+        Line::from("LINE_1"),
+        Line::from(""),
+        Line::from(""),
+        Line::from("LINE_4"),
+    ]);
+
+    test_both_le(&bytes, output, " ");
 }
 
 #[test]
@@ -267,10 +321,29 @@ fn test_faint_reset_sequences() {
 
 #[cfg(test)]
 #[track_caller]
+pub fn test_lossy(bytes: impl AsRef<[u8]>, other: Text) {
+    let bytes = bytes.as_ref();
+    let owned = bytes.into_text_lossy("\n").unwrap();
+    assert_eq!(owned, other);
+}
+
+#[cfg(test)]
+#[track_caller]
 pub fn test_both(bytes: impl AsRef<[u8]>, other: Text) {
     let bytes = bytes.as_ref();
-    let zero_copy = bytes.to_text().unwrap();
-    let owned = bytes.into_text().unwrap();
+    let zero_copy = bytes.to_text("\n").unwrap();
+    let owned = bytes.into_text("\n").unwrap();
+    assert_eq!(zero_copy, owned, "zero-copy and owned version of the methods have diverged this is for sure a bug in the library");
+    assert_eq!(owned, other, "owned and other have diverged this migh be due to a bug in the library or maybe an update to the ratatui crate");
+    assert_eq!(zero_copy, other);
+}
+
+#[cfg(test)]
+#[track_caller]
+pub fn test_both_le(bytes: impl AsRef<[u8]>, other: Text, line_ending: &str) {
+    let bytes = bytes.as_ref();
+    let zero_copy = bytes.to_text(line_ending).unwrap();
+    let owned = bytes.into_text(line_ending).unwrap();
     assert_eq!(zero_copy, owned, "zero-copy and owned version of the methods have diverged this is for sure a bug in the library");
     assert_eq!(owned, other, "owned and other have diverged this migh be due to a bug in the library or maybe an update to the ratatui crate");
     assert_eq!(zero_copy, other);
