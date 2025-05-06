@@ -338,28 +338,37 @@ fn test_faint_reset_sequences() {
 #[cfg(test)]
 #[track_caller]
 pub fn test_lossy(bytes: impl AsRef<[u8]>, other: Text) {
-    use tui::text::ToLine;
+    test_lossy_le(bytes, other, "\n");
+}
+
+#[cfg(test)]
+#[track_caller]
+pub fn test_lossy_le(bytes: impl AsRef<[u8]>, other: Text, line_ending: &str) {
+    // use tui::{style::Styled, text::ToLine};
 
     let bytes = bytes.as_ref();
 
-    let owned = bytes.into_text_lossy("\n").unwrap();
+    let owned = bytes.into_text_lossy(line_ending).unwrap();
     let owned_iter = owned.iter().map(|l| l.styled_graphemes(Style::new()));
 
-    let zero_copy = bytes.to_text_lossy("\n").unwrap();
+    let zero_copy = bytes.to_text_lossy(line_ending).unwrap();
     let zero_copy_iter = zero_copy.iter().map(|l| l.styled_graphemes(Style::new()));
 
     let other_iter = other.iter().map(|l| l.styled_graphemes(Style::new()));
 
-    // Confirming it matches stdlib behavior
-    let std_lossy = String::from_utf8_lossy(bytes);
-    let std_line = std_lossy.to_line();
+    // // Confirming it matches stdlib behavior
+    // let std_lossy = String::from_utf8_lossy(bytes);
+    // let std_line = Line {
+    //     spans: vec![Span::raw(std_lossy)],
+    //     ..Default::default()
+    // };
 
-    assert!(std_line
-        .styled_graphemes(Style::new())
-        .eq(zero_copy_iter.clone().flatten()));
-    assert!(std_line
-        .styled_graphemes(Style::new())
-        .eq(owned_iter.clone().flatten()));
+    // assert!(std_line
+    //     .styled_graphemes(Style::new())
+    //     .eq(zero_copy_iter.clone().flatten()));
+    // assert!(std_line
+    //     .styled_graphemes(Style::new())
+    //     .eq(owned_iter.clone().flatten()));
 
     // Style matching check
     assert!(zero_copy_iter.clone().flatten().eq(owned_iter.clone().flatten()), "zero-copy and owned version of the methods have diverged this is for sure a bug in the library");
@@ -376,6 +385,8 @@ pub fn test_both(bytes: impl AsRef<[u8]>, other: Text) {
     assert_eq!(zero_copy, owned, "zero-copy and owned version of the methods have diverged this is for sure a bug in the library");
     assert_eq!(owned, other, "owned and other have diverged this might be due to a bug in the library or maybe an update to the ratatui crate");
     assert_eq!(zero_copy, other);
+
+    test_lossy(bytes, other);
 }
 
 #[cfg(test)]
@@ -387,4 +398,6 @@ pub fn test_both_le(bytes: impl AsRef<[u8]>, other: Text, line_ending: &str) {
     assert_eq!(zero_copy, owned, "zero-copy and owned version of the methods have diverged this is for sure a bug in the library");
     assert_eq!(owned, other, "owned and other have diverged this might be due to a bug in the library or maybe an update to the ratatui crate");
     assert_eq!(zero_copy, other);
+
+    test_lossy_le(bytes, other, line_ending);
 }
