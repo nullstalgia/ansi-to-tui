@@ -56,20 +56,16 @@ pub trait IntoText {
     fn into_text_lossy(&self, line_ending: &str) -> Result<Text<'static>, Error>;
     /// Convert the type to a Line.
     ///
-    /// Stops at first occurrence of `line_ending` if provided.
+    /// Ignores all line endings, they will be included in the Spans if present.
+    /// Consider splitting your bytes at line-ending boundaries if this is a concern.
     #[allow(clippy::wrong_self_convention)]
-    fn into_line(
-        &self,
-        line_ending: Option<&str>,
-        initial_style: Style,
-    ) -> Result<Line<'static>, Error>;
+    fn into_line(&self, initial_style: Style) -> Result<Line<'static>, Error>;
     /// Convert the type to a Line with lossy UTF-8 conversion.
+    ///
+    /// Ignores all line endings, they will be included in the Spans if present.
+    /// Consider splitting your bytes at line-ending boundaries if this is a concern.
     #[allow(clippy::wrong_self_convention)]
-    fn into_line_lossy(
-        &self,
-        line_ending: Option<&str>,
-        initial_style: Style,
-    ) -> Result<Line<'static>, Error>;
+    fn into_line_lossy(&self, initial_style: Style) -> Result<Line<'static>, Error>;
     /// Convert the type to a Text while trying to copy as less as possible
     ///
     /// Doesn't support lossy conversion.
@@ -88,25 +84,17 @@ where
         Ok(crate::parser::text(self.as_ref(), line_ending, true)?.1)
     }
 
-    fn into_line(
-        &self,
-        line_ending: Option<&str>,
-        initial_style: Style,
-    ) -> Result<Line<'static>, Error> {
+    fn into_line(&self, initial_style: Style) -> Result<Line<'static>, Error> {
         Ok(
-            crate::parser::line(initial_style, line_ending, false)(self.as_ref())?
+            crate::parser::line(initial_style, None, false)(self.as_ref())?
                 .1
                  .0,
         )
     }
 
-    fn into_line_lossy(
-        &self,
-        line_ending: Option<&str>,
-        initial_style: Style,
-    ) -> Result<Line<'static>, Error> {
+    fn into_line_lossy(&self, initial_style: Style) -> Result<Line<'static>, Error> {
         Ok(
-            crate::parser::line(initial_style, line_ending, true)(self.as_ref())?
+            crate::parser::line(initial_style, None, true)(self.as_ref())?
                 .1
                  .0,
         )

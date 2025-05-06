@@ -20,7 +20,7 @@ I recommend switching over to ratatui since tui-rs is currently unmaintained.
 ```rust
 use ansi_to_tui::IntoText;
 let buffer = std::fs::read("ascii/text.ascii").unwrap();
-let output = buffer.into_text();
+let output = buffer.into_text("\n");
 ```
 
 [Text]: https://docs.rs/ratatui/latest/ratatui/text/struct.Text.html
