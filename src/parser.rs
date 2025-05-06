@@ -111,10 +111,14 @@ pub(crate) fn text<'a>(
 }
 
 #[cfg(feature = "zero-copy")]
-pub(crate) fn text_fast<'a>(mut s: &'a [u8], line_ending: &str) -> IResult<&'a [u8], Text<'a>> {
+pub(crate) fn text_fast<'a>(
+    mut s: &'a [u8],
+    line_ending: &str,
+    lossy: bool,
+) -> IResult<&'a [u8], Text<'a>> {
     let mut lines = Vec::new();
     let mut last = Style::new();
-    while let Ok((_s, (line, style))) = line_fast(last, Some(line_ending))(s) {
+    while let Ok((_s, (line, style))) = line_fast(last, Some(line_ending), lossy)(s) {
         lines.push(line);
         last = style;
         s = _s;
@@ -159,24 +163,30 @@ pub(crate) fn line(
 }
 
 #[cfg(feature = "zero-copy")]
-fn line_fast(
+pub(crate) fn line_fast(
     style: Style,
     line_ending: Option<&'_ str>,
+    lossy: bool,
 ) -> impl Fn(&[u8]) -> IResult<&[u8], (Line<'_>, Style)> + '_ {
     // let style_: Style = Default::default();
     move |s: &[u8]| -> IResult<&[u8], (Line<'_>, Style)> {
         let (s, mut text) = take_until_line_ending(line_ending, true)(s)?;
         let mut spans = Vec::new();
         let mut last = style;
-        while let Ok((s, span)) = span_fast(last, line_ending)(text) {
-            match span {
+        while let Ok((s, span_and_replacement)) = span_fast(last, line_ending, lossy)(text) {
+            match span_and_replacement {
                 ValueOrClear::ClearLine => spans.clear(),
-                ValueOrClear::Value(span) => {
-                    last = last.patch(span.style);
-                    // If the spans is empty then it might be possible that the style changes
-                    // but there is no text change
-                    if !span.content.is_empty() {
-                        spans.push(span);
+                ValueOrClear::Value((span, replacement)) => {
+                    if let Some(span) = span {
+                        last = last.patch(span.style);
+                        // If the spans is empty then it might be possible that the style changes
+                        // but there is no text change
+                        if !span.content.is_empty() {
+                            spans.push(span);
+                        }
+                    }
+                    if let Some(replacement) = replacement {
+                        spans.push(replacement);
                     }
                 }
             }
@@ -233,12 +243,19 @@ fn span(
 }
 
 #[cfg(feature = "zero-copy")]
+type ZeroCopyAndReplacementSpans<'a> = (Option<Span<'a>>, Option<Span<'static>>);
+
+#[cfg(feature = "zero-copy")]
 #[allow(clippy::type_complexity)]
 fn span_fast(
     last: Style,
     line_ending: Option<&'_ str>,
-) -> impl Fn(&[u8]) -> IResult<&[u8], ValueOrClear<Span<'_>>, nom::error::Error<&[u8]>> + '_ {
-    move |s: &[u8]| -> IResult<&[u8], ValueOrClear<Span<'_>>> {
+    lossy: bool,
+) -> impl Fn(
+    &[u8],
+) -> IResult<&[u8], ValueOrClear<ZeroCopyAndReplacementSpans>, nom::error::Error<&[u8]>>
+       + '_ {
+    move |s: &[u8]| -> IResult<&[u8], ValueOrClear<ZeroCopyAndReplacementSpans>> {
         let mut last = last;
         let (s, style) = opt(style(last))(s)?;
 
@@ -246,23 +263,83 @@ fn span_fast(
             return Ok((s, ValueOrClear::ClearLine));
         }
 
-        #[cfg(feature = "simd")]
-        let (s, text) = map_res(take_until_esc_or_line_ending(line_ending), |t| {
-            simdutf8::basic::from_utf8(t)
-        })(s)?;
+        let (s, valid, replacement) = if lossy {
+            // let (s, valid, replacement) = {
+            let (rest, bytes) = take_until_esc_or_line_ending(line_ending)(s)?;
 
-        #[cfg(not(feature = "simd"))]
-        let (s, text) = map_res(take_until_esc_or_line_ending(line_ending), |t| {
-            std::str::from_utf8(t)
-        })(s)?;
+            #[cfg(not(feature = "simd"))]
+            let res = std::str::from_utf8(bytes);
+
+            #[cfg(feature = "simd")]
+            let res = simdutf8::compat::from_utf8(bytes);
+
+            match res {
+                Ok(txt) => (rest, Some(txt), None),
+                Err(e) => {
+                    let (valid, after_valid) = s.split_at(e.valid_up_to());
+                    let error_len = e.error_len().unwrap_or_default();
+                    let replacement = Some(Span::styled("\u{FFFD}", last));
+
+                    let valid = if !valid.is_empty() {
+                        Some(
+                            // simdutf8::basic::from_utf8(valid)
+                            // .expect("was promised valid bytes")
+
+                            // SAFETY: simdutf8::compat's docs state that it's Utf8Error is analogous
+                            // to stdlib's of which says `valid_up_to`:
+                            // > Returns the index in the given string up to which __valid UTF-8 was verified.__
+                            unsafe { std::str::from_utf8_unchecked(valid) },
+                        )
+                    } else {
+                        None
+                    };
+
+                    (&after_valid[error_len..], valid, replacement)
+                }
+            }
+            // };
+
+            // (s, valid, replacement)
+        } else {
+            #[cfg(feature = "simd")]
+            let (s, text) = map_res(take_until_esc_or_line_ending(line_ending), |t| {
+                simdutf8::basic::from_utf8(t)
+            })(s)?;
+
+            #[cfg(not(feature = "simd"))]
+            let (s, text) = map_res(take_until_esc_or_line_ending(line_ending), |t| {
+                std::str::from_utf8(t)
+            })(s)?;
+
+            (s, Some(text), None)
+        };
 
         if let Some(ValueOrClear::Value(style)) = style.flatten() {
             last = last.patch(style);
         }
 
-        Ok((s, ValueOrClear::Value(Span::styled(text, last))))
+        let valid = valid.map(|t| Span::styled(t, last));
+
+        Ok((s, ValueOrClear::Value((valid, replacement))))
     }
 }
+
+// fn static_replacement_span(amount: usize, style: Style) -> Span<'static> {
+//     debug_assert_ne!(amount, 0, "No reason to make an owned 0-length span.");
+
+//     const REP: &str = "������������������������"; // Can extend to increase threshold 'til owning. :P
+
+//     if amount <= REP.len() {
+//         // Get byte offset: every char is U+FFFD = 3 bytes
+//         let end = amount * 3;
+//         let s = &REP[..end];
+//         Span::styled(s, style)
+//     } else {
+//         // Build an owned String of 'amount' times U+FFFD
+//         let s: String = std::iter::repeat('\u{FFFD}').take(amount).collect();
+//         Span::styled(s, style)
+//     }
+// }
 
 #[allow(clippy::type_complexity)]
 fn style(
