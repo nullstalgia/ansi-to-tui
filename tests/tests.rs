@@ -1,5 +1,5 @@
 // use ansi_to_tui::{ansi_to_text, ansi_to_text_override_style};
-use ansi_to_tui::IntoText;
+use ansi_to_tui::{IntoText, LossyFlavor};
 use pretty_assertions::assert_eq;
 use tui::style::Stylize;
 use tui::{
@@ -64,7 +64,9 @@ fn test_zero_copy_lossy() {
     let output = Text::raw("AA🦀BB�CC");
     test_lossy(&bytes, output);
 
-    let line = bytes.to_line_lossy(Style::new()).unwrap();
+    let line = bytes
+        .to_line_lossy(Style::new(), LossyFlavor::ReplacementChar(None))
+        .unwrap();
     for span in line {
         let Span { content, .. } = span;
         let std::borrow::Cow::Borrowed(_) = content else {
@@ -348,10 +350,14 @@ pub fn test_lossy_le(bytes: impl AsRef<[u8]>, other: Text, line_ending: &str) {
 
     let bytes = bytes.as_ref();
 
-    let owned = bytes.into_text_lossy(line_ending).unwrap();
+    let owned = bytes
+        .into_text_lossy(line_ending, LossyFlavor::ReplacementChar(None))
+        .unwrap();
     let owned_iter = owned.iter().map(|l| l.styled_graphemes(Style::new()));
 
-    let zero_copy = bytes.to_text_lossy(line_ending).unwrap();
+    let zero_copy = bytes
+        .to_text_lossy(line_ending, LossyFlavor::ReplacementChar(None))
+        .unwrap();
     let zero_copy_iter = zero_copy.iter().map(|l| l.styled_graphemes(Style::new()));
 
     let other_iter = other.iter().map(|l| l.styled_graphemes(Style::new()));

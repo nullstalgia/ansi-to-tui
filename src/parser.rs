@@ -9,11 +9,55 @@ use nom::{
     sequence::{delimited, preceded, terminated, tuple},
     IResult, Parser,
 };
-use std::str::FromStr;
+use std::{char::REPLACEMENT_CHARACTER, str::FromStr};
 use tui::{
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
 };
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+/// When using lossy conversion, specify whether to replace invalid bytes with the
+/// replacement character (�), or show escape their values to be printed.
+///
+/// An optional [Style] can be given for any replaced characters.
+pub enum LossyFlavor {
+    /// Invalid UTF-8 sequences will be replaced with
+    /// [`U+FFFD REPLACEMENT CHARACTER`][U+FFFD], which looks like this: �
+    ReplacementChar(Option<Style>),
+    /// Invalid UTF-8 sequences will be escaped with `\xFF` notation.
+    EscapedBytes(Option<Style>),
+}
+
+impl LossyFlavor {
+    /// Replace any invalid UTF-8 sequences with �, using the text's [Style].
+    pub fn replacement_char() -> Self {
+        Self::ReplacementChar(None)
+    }
+    /// Replace any invalid UTF-8 sequences with � and the given [Style].
+    pub fn replacement_char_styled(style: Style) -> Self {
+        Self::ReplacementChar(Some(style))
+    }
+    /// Escape invalid UTF-8 bytes using `\xFF` notation, with the text's [Style].
+    pub fn escaped_bytes() -> Self {
+        Self::EscapedBytes(None)
+    }
+    /// Escape invalid UTF-8 bytes using `\xFF` notation and the given [Style].
+    pub fn escaped_bytes_styled(style: Style) -> Self {
+        Self::EscapedBytes(Some(style))
+    }
+    /// Get the [Style] of the flavor, if specified.
+    pub fn style(&self) -> Option<Style> {
+        match self {
+            LossyFlavor::ReplacementChar(style) => *style,
+            LossyFlavor::EscapedBytes(style) => *style,
+        }
+    }
+}
+
+struct ValidAndReplacementSpans<'a> {
+    valid: Span<'a>,
+    replacement: Option<Span<'static>>,
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum ValueOrClear<T> {
@@ -95,7 +139,7 @@ impl From<AnsiStates> for tui::style::Style {
 pub(crate) fn text<'a>(
     mut s: &'a [u8],
     line_ending: &str,
-    lossy: bool,
+    lossy: Option<LossyFlavor>,
 ) -> IResult<&'a [u8], Text<'static>> {
     let mut lines = Vec::new();
     let mut last = Style::new();
@@ -114,7 +158,7 @@ pub(crate) fn text<'a>(
 pub(crate) fn text_fast<'a>(
     mut s: &'a [u8],
     line_ending: &str,
-    lossy: bool,
+    lossy: Option<LossyFlavor>,
 ) -> IResult<&'a [u8], Text<'a>> {
     let mut lines = Vec::new();
     let mut last = Style::new();
@@ -132,7 +176,7 @@ pub(crate) fn text_fast<'a>(
 pub(crate) fn line(
     style: Style,
     line_ending: Option<&'_ str>,
-    lossy: bool,
+    lossy: Option<LossyFlavor>,
 ) -> impl Fn(&[u8]) -> IResult<&[u8], (Line<'static>, Style)> + '_ {
     move |s: &[u8]| -> IResult<&[u8], (Line<'static>, Style)> {
         let (s, mut text) = take_until_line_ending(line_ending, true)(s)?;
@@ -142,12 +186,16 @@ pub(crate) fn line(
         while let Ok((s, span)) = span(last, line_ending, lossy)(text) {
             match span {
                 ValueOrClear::ClearLine => spans.clear(),
-                ValueOrClear::Value(span) => {
+                ValueOrClear::Value(ValidAndReplacementSpans { valid, replacement }) => {
                     // Since reset now tracks seperately we can skip the reset check
-                    last = last.patch(span.style);
+                    last = last.patch(valid.style);
 
-                    if !span.content.is_empty() {
-                        spans.push(span);
+                    if !valid.content.is_empty() {
+                        spans.push(valid);
+                    }
+
+                    if let Some(replacement) = replacement {
+                        spans.push(replacement);
                     }
                 }
             }
@@ -166,7 +214,7 @@ pub(crate) fn line(
 pub(crate) fn line_fast(
     style: Style,
     line_ending: Option<&'_ str>,
-    lossy: bool,
+    lossy: Option<LossyFlavor>,
 ) -> impl Fn(&[u8]) -> IResult<&[u8], (Line<'_>, Style)> + '_ {
     // let style_: Style = Default::default();
     move |s: &[u8]| -> IResult<&[u8], (Line<'_>, Style)> {
@@ -176,15 +224,14 @@ pub(crate) fn line_fast(
         while let Ok((s, span_and_replacement)) = span_fast(last, line_ending, lossy)(text) {
             match span_and_replacement {
                 ValueOrClear::ClearLine => spans.clear(),
-                ValueOrClear::Value((span, replacement)) => {
-                    if let Some(span) = span {
-                        last = last.patch(span.style);
-                        // If the spans is empty then it might be possible that the style changes
-                        // but there is no text change
-                        if !span.content.is_empty() {
-                            spans.push(span);
-                        }
+                ValueOrClear::Value(ValidAndReplacementSpans { valid, replacement }) => {
+                    last = last.patch(valid.style);
+                    // If the spans is empty then it might be possible that the style changes
+                    // but there is no text change
+                    if !valid.content.is_empty() {
+                        spans.push(valid);
                     }
+
                     if let Some(replacement) = replacement {
                         spans.push(replacement);
                     }
@@ -205,24 +252,69 @@ pub(crate) fn line_fast(
 fn span(
     last: Style,
     line_ending: Option<&'_ str>,
-    lossy: bool,
-) -> impl Fn(&[u8]) -> IResult<&[u8], ValueOrClear<Span<'static>>, nom::error::Error<&[u8]>> + '_ {
-    move |s: &[u8]| -> IResult<&[u8], ValueOrClear<Span<'static>>> {
+    lossy: Option<LossyFlavor>,
+) -> impl Fn(
+    &[u8],
+) -> IResult<
+    &[u8],
+    ValueOrClear<ValidAndReplacementSpans<'static>>,
+    nom::error::Error<&[u8]>,
+> + '_ {
+    move |s: &[u8]| -> IResult<&[u8], ValueOrClear<ValidAndReplacementSpans<'static>>> {
         let mut last = last;
         let (s, style) = opt(style(last))(s)?;
 
-        if let Some(Some(ValueOrClear::ClearLine)) = style {
-            return Ok((s, ValueOrClear::ClearLine));
-        }
-
-        if lossy {
-            let (s, text) = take_until_esc_or_line_ending(line_ending)(s)?;
-            let text = String::from_utf8_lossy(text);
-            if let Some(ValueOrClear::Value(style)) = style.flatten() {
+        match style.flatten() {
+            Some(ValueOrClear::ClearLine) => {
+                return Ok((s, ValueOrClear::ClearLine));
+            }
+            Some(ValueOrClear::Value(style)) => {
                 last = last.patch(style);
             }
+            None => (),
+        }
 
-            Ok((s, ValueOrClear::Value(Span::styled(text.to_string(), last))))
+        if let Some(flavor) = lossy {
+            let (rest, text) = take_until_esc_or_line_ending(line_ending)(s)?;
+            let chunk_opt = text.utf8_chunks().next();
+
+            let Some(chunk) = chunk_opt else {
+                return Ok((
+                    rest,
+                    ValueOrClear::Value(ValidAndReplacementSpans {
+                        valid: Span::styled("", last),
+                        replacement: None,
+                    }),
+                ));
+            };
+
+            let valid = chunk.valid();
+            let valid_span = Span::styled(valid.to_owned(), last);
+
+            let invalid = chunk.invalid();
+            let parsed_len = valid.len() + invalid.len();
+
+            let replacement = if invalid.is_empty() {
+                None
+            } else {
+                let invalid_style = flavor.style().unwrap_or(last);
+
+                let replacement_content = match flavor {
+                    LossyFlavor::ReplacementChar(_) => std::borrow::Cow::Borrowed("\u{FFFD}"),
+                    LossyFlavor::EscapedBytes(_) => std::borrow::Cow::Owned(
+                        invalid.iter().map(|b| format!(r"\x{b:02X}")).collect(),
+                    ),
+                };
+                Some(Span::styled(replacement_content, invalid_style))
+            };
+
+            Ok((
+                &s[parsed_len..],
+                ValueOrClear::Value(ValidAndReplacementSpans {
+                    valid: valid_span,
+                    replacement,
+                }),
+            ))
         } else {
             #[cfg(feature = "simd")]
             let (s, text) = map_res(take_until_esc_or_line_ending(line_ending), |t| {
@@ -233,38 +325,41 @@ fn span(
             let (s, text) = map_res(take_until_esc_or_line_ending(line_ending), |t| {
                 std::str::from_utf8(t)
             })(s)?;
-            if let Some(ValueOrClear::Value(style)) = style.flatten() {
-                last = last.patch(style);
-            }
 
-            Ok((s, ValueOrClear::Value(Span::styled(text.to_string(), last))))
+            Ok((
+                s,
+                ValueOrClear::Value(ValidAndReplacementSpans {
+                    valid: Span::styled(text.to_owned(), last),
+                    replacement: None,
+                }),
+            ))
         }
     }
 }
-
-#[cfg(feature = "zero-copy")]
-type ZeroCopyAndReplacementSpans<'a> = (Option<Span<'a>>, Option<Span<'static>>);
 
 #[cfg(feature = "zero-copy")]
 #[allow(clippy::type_complexity)]
 fn span_fast(
     last: Style,
     line_ending: Option<&'_ str>,
-    lossy: bool,
-) -> impl Fn(
-    &[u8],
-) -> IResult<&[u8], ValueOrClear<ZeroCopyAndReplacementSpans>, nom::error::Error<&[u8]>>
+    lossy: Option<LossyFlavor>,
+) -> impl Fn(&[u8]) -> IResult<&[u8], ValueOrClear<ValidAndReplacementSpans>, nom::error::Error<&[u8]>>
        + '_ {
-    move |s: &[u8]| -> IResult<&[u8], ValueOrClear<ZeroCopyAndReplacementSpans>> {
+    move |s: &[u8]| -> IResult<&[u8], ValueOrClear<ValidAndReplacementSpans>> {
         let mut last = last;
         let (s, style) = opt(style(last))(s)?;
 
-        if let Some(Some(ValueOrClear::ClearLine)) = style {
-            return Ok((s, ValueOrClear::ClearLine));
+        match style.flatten() {
+            Some(ValueOrClear::ClearLine) => {
+                return Ok((s, ValueOrClear::ClearLine));
+            }
+            Some(ValueOrClear::Value(style)) => {
+                last = last.patch(style);
+            }
+            None => (),
         }
 
-        let (s, valid, replacement) = if lossy {
-            // let (s, valid, replacement) = {
+        let (s, text, replacement) = if let Some(flavor) = lossy {
             let (rest, bytes) = take_until_esc_or_line_ending(line_ending)(s)?;
 
             #[cfg(not(feature = "simd"))]
@@ -274,32 +369,42 @@ fn span_fast(
             let res = simdutf8::compat::from_utf8(bytes);
 
             match res {
-                Ok(txt) => (rest, Some(txt), None),
+                Ok(txt) => (rest, txt, None),
                 Err(e) => {
                     let (valid, after_valid) = s.split_at(e.valid_up_to());
                     let error_len = e.error_len().unwrap_or_default();
-                    let replacement = Some(Span::styled("\u{FFFD}", last));
+                    // let replacement = Some(Span::styled("\u{FFFD}", last));
 
                     let valid = if !valid.is_empty() {
-                        Some(
-                            // simdutf8::basic::from_utf8(valid)
-                            // .expect("was promised valid bytes")
+                        // simdutf8::basic::from_utf8(valid)
+                        // .expect("was promised valid bytes")
 
-                            // SAFETY: simdutf8::compat's docs state that it's Utf8Error is analogous
-                            // to stdlib's of which says `valid_up_to`:
-                            // > Returns the index in the given string up to which __valid UTF-8 was verified.__
-                            unsafe { std::str::from_utf8_unchecked(valid) },
-                        )
+                        // SAFETY: simdutf8::compat's docs state that it's Utf8Error is analogous
+                        // to stdlib's of which says `valid_up_to`:
+                        // > Returns the index in the given string up to which __valid UTF-8 was verified.__
+                        unsafe { std::str::from_utf8_unchecked(valid) }
                     } else {
-                        None
+                        ""
+                    };
+                    let invalid_style = flavor.style().unwrap_or(last);
+
+                    let replacement_content = match flavor {
+                        LossyFlavor::ReplacementChar(_) => std::borrow::Cow::Borrowed("\u{FFFD}"),
+                        LossyFlavor::EscapedBytes(_) => std::borrow::Cow::Owned(
+                            after_valid[..error_len]
+                                .iter()
+                                .map(|b| format!(r"\x{b:02X}"))
+                                .collect(),
+                        ),
                     };
 
-                    (&after_valid[error_len..], valid, replacement)
+                    (
+                        &after_valid[error_len..],
+                        valid,
+                        Some(Span::styled(replacement_content, invalid_style)),
+                    )
                 }
             }
-            // };
-
-            // (s, valid, replacement)
         } else {
             #[cfg(feature = "simd")]
             let (s, text) = map_res(take_until_esc_or_line_ending(line_ending), |t| {
@@ -311,16 +416,15 @@ fn span_fast(
                 std::str::from_utf8(t)
             })(s)?;
 
-            (s, Some(text), None)
+            (s, text, None)
         };
 
-        if let Some(ValueOrClear::Value(style)) = style.flatten() {
-            last = last.patch(style);
-        }
+        let valid = Span::styled(text, last);
 
-        let valid = valid.map(|t| Span::styled(t, last));
-
-        Ok((s, ValueOrClear::Value((valid, replacement))))
+        Ok((
+            s,
+            ValueOrClear::Value(ValidAndReplacementSpans { valid, replacement }),
+        ))
     }
 }
 

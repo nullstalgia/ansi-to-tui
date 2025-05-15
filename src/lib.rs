@@ -40,7 +40,9 @@
 mod code;
 mod error;
 mod parser;
+
 pub use error::Error;
+pub use parser::LossyFlavor;
 use tui::{
     style::Style,
     text::{Line, Text},
@@ -53,7 +55,11 @@ pub trait IntoText {
     fn into_text(&self, line_ending: &str) -> Result<Text<'static>, Error>;
     /// Convert the type to a Text with lossy UTF-8 conversion.
     #[allow(clippy::wrong_self_convention)]
-    fn into_text_lossy(&self, line_ending: &str) -> Result<Text<'static>, Error>;
+    fn into_text_lossy(
+        &self,
+        line_ending: &str,
+        lossy_flavor: LossyFlavor,
+    ) -> Result<Text<'static>, Error>;
     /// Convert the type to a Line.
     ///
     /// Ignores all line endings, they will be included in the Spans if present.
@@ -65,14 +71,22 @@ pub trait IntoText {
     /// Ignores all line endings, they will be included in the Spans if present.
     /// Consider splitting your bytes at line-ending boundaries if this is a concern.
     #[allow(clippy::wrong_self_convention)]
-    fn into_line_lossy(&self, initial_style: Style) -> Result<Line<'static>, Error>;
+    fn into_line_lossy(
+        &self,
+        initial_style: Style,
+        lossy_flavor: LossyFlavor,
+    ) -> Result<Line<'static>, Error>;
 
     /// Convert the type to a Text while trying to copy as little as possible
     #[cfg(feature = "zero-copy")]
     fn to_text(&self, line_ending: &str) -> Result<Text<'_>, Error>;
     /// Convert the type to a Text with lossy UTF-8, trying to copy as little as possible
     #[cfg(feature = "zero-copy")]
-    fn to_text_lossy(&self, line_ending: &str) -> Result<Text<'_>, Error>;
+    fn to_text_lossy(
+        &self,
+        line_ending: &str,
+        lossy_flavor: LossyFlavor,
+    ) -> Result<Text<'_>, Error>;
     /// Convert the type to a Line while trying to copy as little as possible.
     ///
     /// Ignores all line endings, they will be included in the Spans if present.
@@ -84,31 +98,43 @@ pub trait IntoText {
     /// Ignores all line endings, they will be included in the Spans if present.
     /// Consider splitting your bytes at line-ending boundaries if this is a concern.
     #[cfg(feature = "zero-copy")]
-    fn to_line_lossy(&self, initial_style: Style) -> Result<Line<'_>, Error>;
+    fn to_line_lossy(
+        &self,
+        initial_style: Style,
+        lossy_flavor: LossyFlavor,
+    ) -> Result<Line<'_>, Error>;
 }
 impl<T> IntoText for T
 where
     T: AsRef<[u8]>,
 {
     fn into_text(&self, line_ending: &str) -> Result<Text<'static>, Error> {
-        Ok(crate::parser::text(self.as_ref(), line_ending, false)?.1)
+        Ok(crate::parser::text(self.as_ref(), line_ending, None)?.1)
     }
 
-    fn into_text_lossy(&self, line_ending: &str) -> Result<Text<'static>, Error> {
-        Ok(crate::parser::text(self.as_ref(), line_ending, true)?.1)
+    fn into_text_lossy(
+        &self,
+        line_ending: &str,
+        lossy_flavor: LossyFlavor,
+    ) -> Result<Text<'static>, Error> {
+        Ok(crate::parser::text(self.as_ref(), line_ending, Some(lossy_flavor))?.1)
     }
 
     fn into_line(&self, initial_style: Style) -> Result<Line<'static>, Error> {
         Ok(
-            crate::parser::line(initial_style, None, false)(self.as_ref())?
+            crate::parser::line(initial_style, None, None)(self.as_ref())?
                 .1
                  .0,
         )
     }
 
-    fn into_line_lossy(&self, initial_style: Style) -> Result<Line<'static>, Error> {
+    fn into_line_lossy(
+        &self,
+        initial_style: Style,
+        lossy_flavor: LossyFlavor,
+    ) -> Result<Line<'static>, Error> {
         Ok(
-            crate::parser::line(initial_style, None, true)(self.as_ref())?
+            crate::parser::line(initial_style, None, Some(lossy_flavor))(self.as_ref())?
                 .1
                  .0,
         )
@@ -116,24 +142,32 @@ where
 
     #[cfg(feature = "zero-copy")]
     fn to_text(&self, line_ending: &str) -> Result<Text<'_>, Error> {
-        Ok(crate::parser::text_fast(self.as_ref(), line_ending, false)?.1)
+        Ok(crate::parser::text_fast(self.as_ref(), line_ending, None)?.1)
     }
     #[cfg(feature = "zero-copy")]
-    fn to_text_lossy(&self, line_ending: &str) -> Result<Text<'_>, Error> {
-        Ok(crate::parser::text_fast(self.as_ref(), line_ending, true)?.1)
+    fn to_text_lossy(
+        &self,
+        line_ending: &str,
+        lossy_flavor: LossyFlavor,
+    ) -> Result<Text<'_>, Error> {
+        Ok(crate::parser::text_fast(self.as_ref(), line_ending, Some(lossy_flavor))?.1)
     }
     #[cfg(feature = "zero-copy")]
     fn to_line(&self, initial_style: Style) -> Result<Line<'_>, Error> {
         Ok(
-            crate::parser::line_fast(initial_style, None, false)(self.as_ref())?
+            crate::parser::line_fast(initial_style, None, None)(self.as_ref())?
                 .1
                  .0,
         )
     }
     #[cfg(feature = "zero-copy")]
-    fn to_line_lossy(&self, initial_style: Style) -> Result<Line<'_>, Error> {
+    fn to_line_lossy(
+        &self,
+        initial_style: Style,
+        lossy_flavor: LossyFlavor,
+    ) -> Result<Line<'_>, Error> {
         Ok(
-            crate::parser::line_fast(initial_style, None, true)(self.as_ref())?
+            crate::parser::line_fast(initial_style, None, Some(lossy_flavor))(self.as_ref())?
                 .1
                  .0,
         )
