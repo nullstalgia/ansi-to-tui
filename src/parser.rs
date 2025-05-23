@@ -3,7 +3,7 @@ use nom::{
     branch::alt,
     bytes::complete::*,
     character::{complete::*, is_alphabetic},
-    combinator::{map_res, opt, recognize, value},
+    combinator::{map, map_res, opt, recognize, value},
     error::{self, Error, ErrorKind, FromExternalError},
     multi::*,
     sequence::{delimited, preceded, terminated, tuple},
@@ -458,15 +458,20 @@ fn style(
                     items: r,
                 }))),
             ),
-            (s, None) => {
-                // if no style found, check for a clear line
-                let (s, clear) = clear_line_code(s)?;
-                if clear.is_some() {
-                    return Ok((s, clear));
+            (s, None) => match opt(clear_line_code)(s)? {
+                (s, Some(r)) => (s, r),
+                (s, None) => {
+                    let (s, _) = any_escape_sequence(s)?;
+                    (s, None)
                 }
-                let (s, _) = any_escape_sequence(s)?;
-                (s, None)
-            }
+            },
+            // (s, None) => {
+            //     // if no style found, check for a Erase Line command
+            //     let (s, clear) = opt(clear_line_code)(s)?;
+            //     if let Some(Some(clear)) = clear {
+            //         return Ok((s, Some(clear)));
+            //     }
+            // }
         };
         Ok((s, r))
     }
@@ -476,12 +481,56 @@ fn style(
 fn clear_line_code(
     s: &[u8],
 ) -> IResult<&[u8], Option<ValueOrClear<Style>>, nom::error::Error<&[u8]>> {
-    // Match the ANSI 'EL' (Erase in Line) sequence: ESC [ K
-    let (s, matched) = opt(tag("\x1b[K"))(s)?;
-    if matched.is_some() {
-        Ok((s, Some(ValueOrClear::ClearLine)))
+    // Recognizes clear line escape codes: \x1b[K, \x1b[0K, \x1b[1K, \x1b[2K] with potentially-present \r prefix.
+    // See https://vt100.net/docs/vt510-rm/EL.html for details about the "Erase in Line" (EL/K) sequences.
+
+    // Patterns to match:
+    // 1. \x1b[K (ESC [ K)         - with preceding \r, clears line; alone, no effect
+    // 2. \x1b[0K (ESC [ 0 K)      - with preceding \r, clears line; alone, no effect
+    // 3. \x1b[1K (ESC [ 1 K)      - clears from start of line to cursor; i.e., with no \r, clears left
+    // 4. \x1b[2K (ESC [ 2 K)      - clears entire line, always
+    //
+    // noms: [optional \r][ESC][ [ ('K' | '0K' | '1K' | '2K') ]
+
+    use nom::character::complete::char as cchar;
+
+    // Helper for leading '\r', returns the rest
+    let cr = opt(cchar('\r'));
+
+    // Matches ESC [
+    let esc_bracket = tuple((cchar('\x1b'), cchar('[')));
+
+    // Matches the possible code after ESC[
+    // "K", or "0K", or "1K", or "2K"
+    fn el_code(input: &[u8]) -> IResult<&[u8], u8, nom::error::Error<&[u8]>> {
+        // Only match 1K, 2K, 0K, or K (must be ASCII)
+        alt((
+            map(tag("2K"), |_| 2),
+            map(tag("1K"), |_| 1),
+            map(tag("0K"), |_| 0),
+            map(tag("K"), |_| 0),
+        ))(input)
+    }
+
+    // Full matcher: optional \r, then ESC [, then one of the codes.
+    let (rest, (cr_present, _, code)) = match tuple((cr, esc_bracket, el_code))(s) {
+        Ok(v) => v,
+        Err(e) => return Err(e), // Did not match, nothing consumed from input.
+    };
+
+    // Determine if this sequence actually has an effect on the current line.
+    let should_clear = match (code, cr_present.is_some()) {
+        (2, _) => true,     // 2K always clears the line
+        (1, false) => true, // 1K clears from start to cursor = clear left
+        (0, true) => true,  // K or 0K with \r clears line
+        _ => false,
+    };
+
+    if should_clear {
+        Ok((rest, Some(ValueOrClear::ClearLine)))
     } else {
-        Ok((s, None))
+        println!("{code}, {cr_present:?}");
+        Ok((rest, None))
     }
 }
 
@@ -570,14 +619,21 @@ fn take_until_esc_or_line_ending(
 ) -> impl Fn(&[u8]) -> IResult<&[u8], &[u8]> + '_ {
     move |input: &[u8]| {
         let esc = b'\x1b';
+        let cr = b'\r';
         let le_bytes = line_ending.map(|le| le.as_bytes());
         let pos = input
             .iter()
             .enumerate()
             .find_map(|(i, &b)| {
+                // check for the escape byte
                 if b == esc {
                     Some(i)
+                // check for the escape byte prepended by the carriage return
+                } else if b == cr && i + 1 < input.len() && input[i + 1] == esc {
+                    Some(i)
+                // last check, if we supplied a line ending
                 } else if let Some(le) = le_bytes {
+                    // check if it matches
                     if !le.is_empty()
                         && i + le.len() <= input.len()
                         && &input[i..i + le.len()] == le

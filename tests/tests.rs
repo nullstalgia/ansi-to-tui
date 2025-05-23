@@ -22,7 +22,7 @@ fn test_empty_op() {
 
 #[test]
 fn test_clear_line() {
-    let string = b"FOO\n\x1b[32mGREEN\nFOO\x1b[KBAR";
+    let string = b"FOO\n\x1b[32mGREEN\nFOO\r\x1b[KBAR";
     let output = Text::from(vec![
         Line::from(Span::raw("FOO")),
         Line::from(Span::styled("GREEN", Style::default().fg(Color::Green))),
