@@ -9,7 +9,7 @@ use nom::{
     sequence::{delimited, preceded, terminated, tuple},
     IResult, Parser,
 };
-use std::{char::REPLACEMENT_CHARACTER, str::FromStr};
+use std::{borrow::Cow, char::REPLACEMENT_CHARACTER, str::FromStr};
 use tui::{
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
@@ -216,7 +216,6 @@ pub(crate) fn line_fast(
     line_ending: Option<&'_ str>,
     lossy: Option<LossyFlavor>,
 ) -> impl Fn(&[u8]) -> IResult<&[u8], (Line<'_>, Style)> + '_ {
-    // let style_: Style = Default::default();
     move |s: &[u8]| -> IResult<&[u8], (Line<'_>, Style)> {
         let (s, mut text) = take_until_line_ending(line_ending, true)(s)?;
         let mut spans = Vec::new();
@@ -275,18 +274,8 @@ fn span(
         }
 
         if let Some(flavor) = lossy {
-            let (rest, text) = take_until_esc_or_line_ending(line_ending)(s)?;
-            let chunk_opt = text.utf8_chunks().next();
-
-            let Some(chunk) = chunk_opt else {
-                return Ok((
-                    rest,
-                    ValueOrClear::Value(ValidAndReplacementSpans {
-                        valid: Span::styled("", last),
-                        replacement: None,
-                    }),
-                ));
-            };
+            let (_, text) = take_until_next_esc_or_line_ending(line_ending)(s)?;
+            let chunk = text.utf8_chunks().next().unwrap();
 
             let valid = chunk.valid();
             let valid_span = Span::styled(valid.to_owned(), last);
@@ -297,15 +286,14 @@ fn span(
             let replacement = if invalid.is_empty() {
                 None
             } else {
-                let invalid_style = flavor.style().unwrap_or(last);
-
+                let replacement_style = flavor.style().unwrap_or(last);
                 let replacement_content = match flavor {
-                    LossyFlavor::ReplacementChar(_) => std::borrow::Cow::Borrowed("\u{FFFD}"),
-                    LossyFlavor::EscapedBytes(_) => std::borrow::Cow::Owned(
-                        invalid.iter().map(|b| format!(r"\x{b:02X}")).collect(),
-                    ),
+                    LossyFlavor::ReplacementChar(_) => Cow::Borrowed("\u{FFFD}"),
+                    LossyFlavor::EscapedBytes(_) => {
+                        Cow::Owned(invalid.iter().map(|b| format!(r"\x{b:02X}")).collect())
+                    }
                 };
-                Some(Span::styled(replacement_content, invalid_style))
+                Some(Span::styled(replacement_content, replacement_style))
             };
 
             Ok((
@@ -317,12 +305,12 @@ fn span(
             ))
         } else {
             #[cfg(feature = "simd")]
-            let (s, text) = map_res(take_until_esc_or_line_ending(line_ending), |t| {
+            let (s, text) = map_res(take_until_next_esc_or_line_ending(line_ending), |t| {
                 simdutf8::basic::from_utf8(t)
             })(s)?;
 
             #[cfg(not(feature = "simd"))]
-            let (s, text) = map_res(take_until_esc_or_line_ending(line_ending), |t| {
+            let (s, text) = map_res(take_until_next_esc_or_line_ending(line_ending), |t| {
                 std::str::from_utf8(t)
             })(s)?;
 
@@ -360,7 +348,7 @@ fn span_fast(
         }
 
         let (s, text, replacement) = if let Some(flavor) = lossy {
-            let (rest, bytes) = take_until_esc_or_line_ending(line_ending)(s)?;
+            let (rest, bytes) = take_until_next_esc_or_line_ending(line_ending)(s)?;
 
             #[cfg(not(feature = "simd"))]
             let res = std::str::from_utf8(bytes);
@@ -372,47 +360,45 @@ fn span_fast(
                 Ok(txt) => (rest, txt, None),
                 Err(e) => {
                     let (valid, after_valid) = s.split_at(e.valid_up_to());
-                    let error_len = e.error_len().unwrap_or_default();
-                    // let replacement = Some(Span::styled("\u{FFFD}", last));
 
-                    let valid = if !valid.is_empty() {
-                        // simdutf8::basic::from_utf8(valid)
-                        // .expect("was promised valid bytes")
-
+                    let valid = if valid.is_empty() {
+                        ""
+                    } else {
                         // SAFETY: simdutf8::compat's docs state that it's Utf8Error is analogous
                         // to stdlib's of which says `valid_up_to`:
                         // > Returns the index in the given string up to which __valid UTF-8 was verified.__
                         unsafe { std::str::from_utf8_unchecked(valid) }
-                    } else {
-                        ""
-                    };
-                    let invalid_style = flavor.style().unwrap_or(last);
-
-                    let replacement_content = match flavor {
-                        LossyFlavor::ReplacementChar(_) => std::borrow::Cow::Borrowed("\u{FFFD}"),
-                        LossyFlavor::EscapedBytes(_) => std::borrow::Cow::Owned(
-                            after_valid[..error_len]
-                                .iter()
-                                .map(|b| format!(r"\x{b:02X}"))
-                                .collect(),
-                        ),
                     };
 
-                    (
-                        &after_valid[error_len..],
-                        valid,
-                        Some(Span::styled(replacement_content, invalid_style)),
-                    )
+                    let replacement_style = flavor.style().unwrap_or(last);
+
+                    let invalid = match e.error_len() {
+                        // Input ended unexpectedly, use the rest.
+                        None => after_valid,
+                        Some(invalid) => &after_valid[..invalid],
+                    };
+
+                    let replacement = {
+                        let replacement_text = match flavor {
+                            LossyFlavor::ReplacementChar(_) => Cow::Borrowed("\u{FFFD}"),
+                            LossyFlavor::EscapedBytes(_) => {
+                                Cow::Owned(invalid.iter().map(|b| format!(r"\x{b:02X}")).collect())
+                            }
+                        };
+                        Some(Span::styled(replacement_text, replacement_style))
+                    };
+
+                    (&s[valid.len() + invalid.len()..], valid, replacement)
                 }
             }
         } else {
             #[cfg(feature = "simd")]
-            let (s, text) = map_res(take_until_esc_or_line_ending(line_ending), |t| {
+            let (s, text) = map_res(take_until_next_esc_or_line_ending(line_ending), |t| {
                 simdutf8::basic::from_utf8(t)
             })(s)?;
 
             #[cfg(not(feature = "simd"))]
-            let (s, text) = map_res(take_until_esc_or_line_ending(line_ending), |t| {
+            let (s, text) = map_res(take_until_next_esc_or_line_ending(line_ending), |t| {
                 std::str::from_utf8(t)
             })(s)?;
 
@@ -427,23 +413,6 @@ fn span_fast(
         ))
     }
 }
-
-// fn static_replacement_span(amount: usize, style: Style) -> Span<'static> {
-//     debug_assert_ne!(amount, 0, "No reason to make an owned 0-length span.");
-
-//     const REP: &str = "������������������������"; // Can extend to increase threshold 'til owning. :P
-
-//     if amount <= REP.len() {
-//         // Get byte offset: every char is U+FFFD = 3 bytes
-//         let end = amount * 3;
-//         let s = &REP[..end];
-//         Span::styled(s, style)
-//     } else {
-//         // Build an owned String of 'amount' times U+FFFD
-//         let s: String = std::iter::repeat('\u{FFFD}').take(amount).collect();
-//         Span::styled(s, style)
-//     }
-// }
 
 #[allow(clippy::type_complexity)]
 fn style(
@@ -529,7 +498,6 @@ fn clear_line_code(
     if should_clear {
         Ok((rest, Some(ValueOrClear::ClearLine)))
     } else {
-        println!("{code}, {cr_present:?}");
         Ok((rest, None))
     }
 }
@@ -614,12 +582,11 @@ fn color_type(s: &[u8]) -> IResult<&[u8], ColorType> {
     }
 }
 
-fn take_until_esc_or_line_ending(
+fn take_until_next_esc_or_line_ending(
     line_ending: Option<&'_ str>,
 ) -> impl Fn(&[u8]) -> IResult<&[u8], &[u8]> + '_ {
     move |input: &[u8]| {
         let esc = b'\x1b';
-        let cr = b'\r';
         let le_bytes = line_ending.map(|le| le.as_bytes());
         let pos = input
             .iter()
@@ -629,7 +596,7 @@ fn take_until_esc_or_line_ending(
                 if b == esc {
                     Some(i)
                 // check for the escape byte prepended by the carriage return
-                } else if b == cr && i + 1 < input.len() && input[i + 1] == esc {
+                } else if clear_line_code(&input[i..]).is_ok() {
                     Some(i)
                 // last check, if we supplied a line ending
                 } else if let Some(le) = le_bytes {
@@ -686,7 +653,7 @@ mod parser_tests {
     #[test]
     fn test_take_until_esc_or_line_ending_esc() {
         let input = b"Hello\x1b[1mWorld";
-        let f = take_until_esc_or_line_ending(None);
+        let f = take_until_next_esc_or_line_ending(None);
         let (rest, out) = f(input).unwrap();
         assert_eq!(out, b"Hello");
         assert_eq!(rest, b"\x1b[1mWorld");
@@ -695,7 +662,7 @@ mod parser_tests {
     #[test]
     fn test_take_until_esc_or_line_ending_line_ending_found() {
         let input = b"foo\r\nbar";
-        let f = take_until_esc_or_line_ending(Some("\r\n"));
+        let f = take_until_next_esc_or_line_ending(Some("\r\n"));
         let (rest, out) = f(input).unwrap();
         assert_eq!(out, b"foo");
         assert_eq!(rest, b"\r\nbar");
@@ -704,7 +671,7 @@ mod parser_tests {
     #[test]
     fn test_take_until_esc_or_line_ending_line_ending_not_found() {
         let input = b"foo";
-        let f = take_until_esc_or_line_ending(Some("\n"));
+        let f = take_until_next_esc_or_line_ending(Some("\n"));
         let (rest, out) = f(input).unwrap();
         assert_eq!(out, b"foo");
         assert_eq!(rest, b"");
@@ -713,13 +680,13 @@ mod parser_tests {
     #[test]
     fn test_take_until_esc_or_line_ending_both_present_picks_earliest() {
         let input = b"xx\x1bfoo\nbar";
-        let f = take_until_esc_or_line_ending(Some("\n"));
+        let f = take_until_next_esc_or_line_ending(Some("\n"));
         let (rest, out) = f(input).unwrap();
         assert_eq!(out, b"xx");
         assert_eq!(rest, b"\x1bfoo\nbar");
 
         let input = b"abc\ndef\x1bgh";
-        let f = take_until_esc_or_line_ending(Some("\n"));
+        let f = take_until_next_esc_or_line_ending(Some("\n"));
         let (rest, out) = f(input).unwrap();
         assert_eq!(out, b"abc");
         assert_eq!(rest, b"\ndef\x1bgh");
@@ -728,7 +695,7 @@ mod parser_tests {
     #[test]
     fn test_take_until_esc_or_line_ending_empty_input() {
         let input = b"";
-        let f = take_until_esc_or_line_ending(Some("\n"));
+        let f = take_until_next_esc_or_line_ending(Some("\n"));
         let (rest, out) = f(input).unwrap();
         assert_eq!(out, b"");
         assert_eq!(rest, b"");
