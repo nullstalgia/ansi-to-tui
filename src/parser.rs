@@ -274,35 +274,61 @@ fn span(
         }
 
         if let Some(flavor) = lossy {
-            let (_, text) = take_until_next_esc_or_line_ending(line_ending)(s)?;
-            let chunk = text.utf8_chunks().next().unwrap();
+            let (rest, bytes) = take_until_next_esc_or_line_ending(line_ending)(s)?;
 
-            let valid = chunk.valid();
-            let valid_span = Span::styled(valid.to_owned(), last);
+            #[cfg(not(feature = "simd"))]
+            let res = std::str::from_utf8(bytes);
 
-            let invalid = chunk.invalid();
-            let parsed_len = valid.len() + invalid.len();
+            #[cfg(feature = "simd")]
+            let res = simdutf8::compat::from_utf8(bytes);
 
-            let replacement = if invalid.is_empty() {
-                None
-            } else {
-                let replacement_style = flavor.style().unwrap_or(last);
-                let replacement_content = match flavor {
-                    LossyFlavor::ReplacementChar(_) => Cow::Borrowed("\u{FFFD}"),
-                    LossyFlavor::EscapedBytes(_) => {
-                        Cow::Owned(invalid.iter().map(|b| format!(r"\x{b:02X}")).collect())
-                    }
-                };
-                Some(Span::styled(replacement_content, replacement_style))
-            };
+            match res {
+                Ok(txt) => Ok((
+                    rest,
+                    ValueOrClear::Value(ValidAndReplacementSpans {
+                        valid: Span::styled(txt.to_owned(), last),
+                        replacement: None,
+                    }),
+                )),
+                Err(e) => {
+                    let (valid, after_valid) = s.split_at(e.valid_up_to());
 
-            Ok((
-                &s[parsed_len..],
-                ValueOrClear::Value(ValidAndReplacementSpans {
-                    valid: valid_span,
-                    replacement,
-                }),
-            ))
+                    let valid = if valid.is_empty() {
+                        ""
+                    } else {
+                        // SAFETY: simdutf8::compat's docs state that it's Utf8Error is analogous
+                        // to stdlib's of which says `valid_up_to`:
+                        // > Returns the index in the given string up to which __valid UTF-8 was verified.__
+                        unsafe { std::str::from_utf8_unchecked(valid) }
+                    };
+
+                    let replacement_style = flavor.style().unwrap_or(last);
+
+                    let invalid = match e.error_len() {
+                        // Input ended unexpectedly, consume as if it's malformed.
+                        None => after_valid,
+                        Some(invalid) => &after_valid[..invalid],
+                    };
+
+                    let replacement = {
+                        let replacement_text = match flavor {
+                            LossyFlavor::ReplacementChar(_) => Cow::Borrowed("\u{FFFD}"),
+                            LossyFlavor::EscapedBytes(_) => {
+                                Cow::Owned(invalid.iter().map(|b| format!(r"\x{b:02X}")).collect())
+                            }
+                        };
+                        Some(Span::styled(replacement_text, replacement_style))
+                    };
+
+                    Ok((
+                        &s[valid.len() + invalid.len()..],
+                        ValueOrClear::Value(ValidAndReplacementSpans {
+                            valid: Span::styled(valid.to_owned(), last),
+                            replacement,
+                        }),
+                    ))
+                }
+            }
         } else {
             #[cfg(feature = "simd")]
             let (s, text) = map_res(take_until_next_esc_or_line_ending(line_ending), |t| {
@@ -373,7 +399,7 @@ fn span_fast(
                     let replacement_style = flavor.style().unwrap_or(last);
 
                     let invalid = match e.error_len() {
-                        // Input ended unexpectedly, use the rest.
+                        // Input ended unexpectedly, consume as if it's malformed.
                         None => after_valid,
                         Some(invalid) => &after_valid[..invalid],
                     };
