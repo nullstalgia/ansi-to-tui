@@ -26,6 +26,8 @@ pub enum LossyFlavor {
     ReplacementChar(Option<Style>),
     /// Invalid UTF-8 sequences will be escaped with `\xFF` notation.
     EscapedBytes(Option<Style>),
+    /// Invalid UTF-8 sequences will be omitted entirely.
+    Omitted,
 }
 
 impl LossyFlavor {
@@ -45,11 +47,16 @@ impl LossyFlavor {
     pub fn escaped_bytes_styled(style: Style) -> Self {
         Self::EscapedBytes(Some(style))
     }
+    /// Invalid UTF-8 sequences will be omitted entirely.
+    pub fn omitted() -> Self {
+        Self::Omitted
+    }
     /// Get the [Style] of the flavor, if specified.
     pub fn style(&self) -> Option<Style> {
         match self {
             LossyFlavor::ReplacementChar(style) => *style,
             LossyFlavor::EscapedBytes(style) => *style,
+            LossyFlavor::Omitted => None,
         }
     }
 }
@@ -162,7 +169,8 @@ pub(crate) fn text_fast<'a>(
 ) -> IResult<&'a [u8], Text<'a>> {
     let mut lines = Vec::new();
     let mut last = Style::new();
-    while let Ok((_s, (line, style))) = line_fast(last, Some(line_ending), lossy)(s) {
+    while let Ok((_s, (line, style, _spans_cleared))) = line_fast(last, Some(line_ending), lossy)(s)
+    {
         lines.push(line);
         last = style;
         s = _s;
@@ -215,14 +223,19 @@ pub(crate) fn line_fast(
     style: Style,
     line_ending: Option<&'_ str>,
     lossy: Option<LossyFlavor>,
-) -> impl Fn(&[u8]) -> IResult<&[u8], (Line<'_>, Style)> + '_ {
-    move |s: &[u8]| -> IResult<&[u8], (Line<'_>, Style)> {
+) -> impl Fn(&[u8]) -> IResult<&[u8], (Line<'_>, Style, Option<(usize, Style)>)> + '_ {
+    move |s: &[u8]| -> IResult<&[u8], (Line<'_>, Style, Option<(usize, Style)>)> {
         let (s, mut text) = take_until_line_ending(line_ending, true)(s)?;
+        let original_text_len = text.len();
         let mut spans = Vec::new();
+        let mut spans_cleared_at = None;
         let mut last = style;
         while let Ok((s, span_and_replacement)) = span_fast(last, line_ending, lossy)(text) {
             match span_and_replacement {
-                ValueOrClear::ClearLine => spans.clear(),
+                ValueOrClear::ClearLine => {
+                    spans.clear();
+                    spans_cleared_at = Some((original_text_len - s.len(), last));
+                }
                 ValueOrClear::Value(ValidAndReplacementSpans { valid, replacement }) => {
                     last = last.patch(valid.style);
                     // If the spans is empty then it might be possible that the style changes
@@ -243,7 +256,7 @@ pub(crate) fn line_fast(
             }
         }
 
-        Ok((s, (Line::from(spans), last)))
+        Ok((s, (Line::from(spans), last, spans_cleared_at)))
     }
 }
 
@@ -311,13 +324,19 @@ fn span(
                     };
 
                     let replacement = {
-                        let replacement_text = match flavor {
-                            LossyFlavor::ReplacementChar(_) => Cow::Borrowed("\u{FFFD}"),
-                            LossyFlavor::EscapedBytes(_) => {
-                                Cow::Owned(invalid.iter().map(|b| format!(r"\x{b:02X}")).collect())
+                        match flavor {
+                            LossyFlavor::ReplacementChar(_) => {
+                                let cow = Cow::Borrowed("\u{FFFD}");
+                                Some(Span::styled(cow, replacement_style))
                             }
-                        };
-                        Some(Span::styled(replacement_text, replacement_style))
+                            LossyFlavor::EscapedBytes(_) => {
+                                let cow = Cow::Owned(
+                                    invalid.iter().map(|b| format!(r"\x{b:02X}")).collect(),
+                                );
+                                Some(Span::styled(cow, replacement_style))
+                            }
+                            LossyFlavor::Omitted => None,
+                        }
                     };
 
                     Ok((
@@ -405,13 +424,19 @@ fn span_fast(
                     };
 
                     let replacement = {
-                        let replacement_text = match flavor {
-                            LossyFlavor::ReplacementChar(_) => Cow::Borrowed("\u{FFFD}"),
-                            LossyFlavor::EscapedBytes(_) => {
-                                Cow::Owned(invalid.iter().map(|b| format!(r"\x{b:02X}")).collect())
+                        match flavor {
+                            LossyFlavor::ReplacementChar(_) => {
+                                let cow = Cow::Borrowed("\u{FFFD}");
+                                Some(Span::styled(cow, replacement_style))
                             }
-                        };
-                        Some(Span::styled(replacement_text, replacement_style))
+                            LossyFlavor::EscapedBytes(_) => {
+                                let cow = Cow::Owned(
+                                    invalid.iter().map(|b| format!(r"\x{b:02X}")).collect(),
+                                );
+                                Some(Span::styled(cow, replacement_style))
+                            }
+                            LossyFlavor::Omitted => None,
+                        }
                     };
 
                     (&s[valid.len() + invalid.len()..], valid, replacement)

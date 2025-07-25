@@ -103,6 +103,19 @@ pub trait IntoText {
         initial_style: Style,
         lossy_flavor: LossyFlavor,
     ) -> Result<Line<'_>, Error>;
+    /// Convert the type to a Line with lossy UTF-8, trying to copy as little as possible.
+    ///
+    /// Ignores all line endings, they will be included in the Spans if present.
+    /// Consider splitting your bytes at line-ending boundaries if this is a concern.
+    ///
+    /// Returns a tuple with the resulting line and an Option, which if Some,
+    /// contains the index after a clear line command, and the active style at that index.
+    #[cfg(feature = "zero-copy")]
+    fn to_line_lossy_flagged(
+        &self,
+        initial_style: Style,
+        lossy_flavor: LossyFlavor,
+    ) -> Result<(Line<'_>, Option<(usize, Style)>), Error>;
 }
 impl<T> IntoText for T
 where
@@ -171,5 +184,16 @@ where
                 .1
                  .0,
         )
+    }
+
+    #[cfg(feature = "zero-copy")]
+    fn to_line_lossy_flagged(
+        &self,
+        initial_style: Style,
+        lossy_flavor: LossyFlavor,
+    ) -> Result<(Line<'_>, Option<(usize, Style)>), Error> {
+        let res =
+            crate::parser::line_fast(initial_style, None, Some(lossy_flavor))(self.as_ref())?.1;
+        Ok((res.0, res.2))
     }
 }
