@@ -1,0 +1,68 @@
+[package]
+name = "ansi-to-tui-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2018"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tui = { version = "0.29", default-features = false, package = "ratatui" }
+
+[dependencies.ansi-to-tui]
+path = ".."
+
+# I think these are the ones to be used primarily when fuzzing as it does the least extra
+# (and mostly unrelated to what's under test) memory operations
+[[bin]]
+name = "lossy_line_omit"
+path = "fuzz_targets/lossy_line_omit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lossy_text_crlf_omit"
+path = "fuzz_targets/lossy_text_crlf_omit.rs"
+test = false
+doc = false
+bench = false
+
+# But for completeness' sake, I've added some more common test cases.
+
+[[bin]]
+name = "lossy_line_rep_char"
+path = "fuzz_targets/lossy_line_rep_char.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lossy_line_escape"
+path = "fuzz_targets/lossy_line_escape.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lossy_text_crlf"
+path = "fuzz_targets/lossy_text_crlf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lossy_text_cr"
+path = "fuzz_targets/lossy_text_cr.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lossy_text_lf"
+path = "fuzz_targets/lossy_text_lf.rs"
+test = false
+doc = false
+bench = false
