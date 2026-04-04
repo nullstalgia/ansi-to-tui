@@ -273,6 +273,21 @@ fn span(
     nom::error::Error<&[u8]>,
 > + '_ {
     move |s: &[u8]| -> IResult<&[u8], ValueOrClear<ValidAndReplacementSpans<'static>>> {
+        // If s starts with line ending, return immediately
+        // if let Some(le) = line_ending {
+        //     let le_bytes = le.as_bytes();
+        //     if !le_bytes.is_empty() && s.starts_with(le_bytes) {
+        //         // nom: return as-is, empty span (for line ending-separators)
+        //         return Ok((
+        //             &s[le_bytes.len()..],
+        //             ValueOrClear::Value(ValidAndReplacementSpans {
+        //                 valid: Span::styled(le.to_owned(), last),
+        //                 replacement: None,
+        //             }),
+        //         ));
+        //     }
+        // }
+
         let mut last = last;
         let (s, style) = opt(style(last))(s)?;
 
@@ -379,6 +394,21 @@ fn span_fast(
 ) -> impl Fn(&[u8]) -> IResult<&[u8], ValueOrClear<ValidAndReplacementSpans>, nom::error::Error<&[u8]>>
        + '_ {
     move |s: &[u8]| -> IResult<&[u8], ValueOrClear<ValidAndReplacementSpans>> {
+        // If s starts with line ending, return immediately
+        // if let Some(le) = line_ending {
+        //     let le_bytes = le.as_bytes();
+        //     if !le_bytes.is_empty() && s.starts_with(le_bytes) {
+        //         // nom: return as-is, empty span (for line ending-separators)
+        //         return Ok((
+        //             &s[le_bytes.len()..],
+        //             ValueOrClear::Value(ValidAndReplacementSpans {
+        //                 valid: Span::styled(le.to_owned(), last),
+        //                 replacement: None,
+        //             }),
+        //         ));
+        //     }
+        // }
+
         let mut last = last;
         let (s, style) = opt(style(last))(s)?;
 
